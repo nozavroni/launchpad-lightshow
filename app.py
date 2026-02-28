@@ -32,7 +32,7 @@ def velocity_to_hex(velocity: int) -> str:
 
 
 def xy_to_note(x: int, y: int) -> int:
-    # Launchpad-style programmer mode map for 8x8 grid.
+    # Map app r1..r8 to Launchpad X 8x8 matrix rows (note rows 71..11).
     return (8 - y) * 10 + (x + 1)
 
 
@@ -116,13 +116,66 @@ class MidoBackend:
         names = mido.get_output_names()
         if not names:
             return False, "No MIDI outputs found"
-        preferred = [n for n in names if "launchpad x" in n.lower()]
-        if not preferred:
-            preferred = [n for n in names if "launchpad" in n.lower()]
-        target = preferred[0] if preferred else names[0]
+
+        def score_output(name: str) -> tuple[int, int]:
+            lower = name.lower()
+            score = 0
+            if "launchpad x" in lower:
+                score += 100
+            elif "launchpad" in lower:
+                score += 60
+            if "lpx midi" in lower or "midi" in lower:
+                score += 30
+            if "daw" in lower:
+                score -= 40
+            return score, -len(name)
+
+        ranked = sorted(names, key=score_output, reverse=True)
+        target = ranked[0] if ranked else names[0]
         self._port = mido.open_output(target)
         self.port_name = target
+        switches = self._set_programmer_mode(target, names)
+        if switches:
+            return True, f"Connected: {target} (programmer mode set)"
         return True, f"Connected: {target}"
+
+    def _send_programmer_sysex(self, out_port: object) -> bool:
+        if not self._mido:
+            return False
+        # Try Launchpad X and Mini MK3 family IDs.
+        for device_id in (0x0D, 0x0C):
+            try:
+                out_port.send(
+                    self._mido.Message("sysex", data=[0x00, 0x20, 0x29, 0x02, device_id, 0x0E, 0x01])
+                )
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _set_programmer_mode(self, target: str, output_names: list[str]) -> int:
+        switches = 0
+        if self._port and self._send_programmer_sysex(self._port):
+            switches += 1
+        target_lower = target.lower()
+        if "launchpad" not in target_lower:
+            return switches
+        for name in output_names:
+            lower = name.lower()
+            if name == target:
+                continue
+            if "launchpad" not in lower or "daw" in lower:
+                continue
+            try:
+                extra_port = self._mido.open_output(name)
+            except Exception:
+                continue
+            try:
+                if self._send_programmer_sysex(extra_port):
+                    switches += 1
+            finally:
+                extra_port.close()
+        return switches
 
     def send_pad(self, x: int, y: int, color: int) -> None:
         if not self._mido or not self._port:
